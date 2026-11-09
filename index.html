@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Detention Pay Doctor - AamirTechs</title>
+<style>
+:root{--navy:#0b1f3a;--gold:#d4a72c;--bg:#f6f8fb;--ink:#1c2733;--muted:#5b6b7c;--line:#d9e1ea}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background:var(--bg);color:var(--ink)}
+header{background:var(--navy);color:#fff;padding:28px 20px;border-bottom:4px solid var(--gold)}
+header .wrap{max-width:880px;margin:0 auto}
+header h1{margin:0 0 6px;font-size:1.6rem}
+header p{margin:0;color:#c8d4e4}
+main{max-width:880px;margin:24px auto;padding:0 20px}
+.card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(11,31,58,.08)}
+label{display:block;font-weight:600;margin:14px 0 6px}
+.card>label:first-child{margin-top:0}
+textarea{width:100%;min-height:180px;padding:10px;border:1px solid var(--line);border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.85rem}
+input[type=text],input[type=number],select{padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:.95rem;width:100%}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:4px}
+.grid label{margin:0 0 6px}
+.row{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}
+button{background:var(--navy);color:#fff;border:0;border-radius:8px;padding:10px 18px;font-size:.95rem;cursor:pointer}
+button.alt{background:#fff;color:var(--navy);border:1px solid var(--navy)}
+button.gold{background:var(--gold);color:#0b1f3a;font-weight:600}
+pre{background:#0b1f3a;color:#eef3f9;border-radius:8px;padding:16px;overflow-x:auto;white-space:pre-wrap;word-break:break-word;min-height:60px;font-size:.85rem}
+footer{max-width:880px;margin:0 auto 32px;padding:0 20px;color:var(--muted);font-size:.9rem}
+footer a{color:var(--navy)}
+.hint{color:var(--muted);font-size:.85rem;margin-top:6px;font-weight:400}
+</style>
+</head>
+<body>
+<header><div class="wrap"><h1>Detention Pay Doctor</h1><p>Compute detention pay for truck loads from arrival and departure timestamps: time beyond free time, rounded up to the billing increment, capped when a cap is given.</p></div></header>
+<main><div class="card">
+<label for="file">Input JSON file</label>
+<input type="file" id="file" accept=".json,application/json">
+<label for="input">Or paste the JSON input</label>
+<textarea id="input" spellcheck="false" placeholder="Paste a JSON list of loads here, or load the sample."></textarea>
+<label>Defaults for loads that omit a field</label>
+<div class="grid">
+<div><label for="opt-free">Free hours</label><input type="number" id="opt-free" step="any" value="2"></div>
+<div><label for="opt-rate">Rate per hour ($)</label><input type="number" id="opt-rate" step="any" value="75"></div>
+<div><label for="opt-inc">Billing increment (minutes)</label><input type="number" id="opt-inc" step="any" value="15"></div>
+<div><label for="opt-cap">Cap amount ($) <span class="hint">blank means no cap</span></label><input type="number" id="opt-cap" step="any" placeholder="none"></div>
+</div>
+<div class="row"><button class="gold" id="run" type="button">Run</button><button class="alt" id="sample" type="button">Load sample</button><button class="alt" id="download" type="button">Download report</button></div>
+<label for="out">Report</label>
+<pre id="out">Your report will appear here.</pre>
+</div></main>
+<footer>
+<p>Built by AamirTechs. <a href="https://aamirtechs.github.io/">All tools</a> | <a href="https://github.com/aamirtechs/detention-pay-doctor">Source</a></p>
+<p>Privacy: this tool runs 100% in your browser, nothing is uploaded.</p>
+</footer>
+<script id="core">
+// Pure logic port of detention_pay_doctor.py. No DOM access in this block.
+// Decimals are {c: BigInt coefficient, e: exponent} with value c * 10^e,
+// mirroring Python Decimal behaviour for the operations used here.
+function Dec(v) {
+  if (v && typeof v === "object" && typeof v.c === "bigint") return v;
+  if (typeof v !== "string" && typeof v !== "number") throw new Error("not a number");
+  var s = String(v).trim();
+  var m = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$/.exec(s);
+  if (!m) throw new Error("not a number: " + s);
+  var intPart = m[2] || "";
+  var fracPart = (m[3] !== undefined ? m[3] : (m[4] || ""));
+  var exp = (m[5] ? parseInt(m[5], 10) : 0) - fracPart.length;
+  var digits = (intPart + fracPart).replace(/^0+/, "");
+  if (digits === "") return { c: 0n, e: exp };
+  var c = BigInt(digits);
+  if (m[1] === "-") c = -c;
+  return { c: c, e: exp };
+}
+function decStr(d) {
+  if (d.c === 0n) {
+    if (d.e >= 0) return "0" + "0".repeat(d.e);
+    var z = "0.";
+    for (var i = 0; i < -d.e - 1; i++) z += "0";
+    return z + "0";
+  }
+  var neg = d.c < 0n;
+  var digits = (neg ? -d.c : d.c).toString();
+  var out;
+  if (d.e >= 0) out = digits + "0".repeat(d.e);
+  else {
+    var pos = digits.length + d.e;
+    if (pos > 0) out = digits.slice(0, pos) + "." + digits.slice(pos);
+    else out = "0." + "0".repeat(-pos) + digits;
+  }
+  return (neg ? "-" : "") + out;
+}
+function decAdd(a, b) {
+  var e = Math.min(a.e, b.e);
+  var ca = a.c * (10n ** BigInt(a.e - e));
+  var cb = b.c * (10n ** BigInt(b.e - e));
+  return { c: ca + cb, e: e };
+}
+function decSub(a, b) { return decAdd(a, { c: -b.c, e: b.e }); }
+function decMul(a, b) { return { c: a.c * b.c, e: a.e + b.e }; }
+function decCmp(a, b) {
+  var d = decSub(a, b);
+  return d.c < 0n ? -1 : (d.c > 0n ? 1 : 0);
+}
+function decDiv(a, b) {
+  if (b.c === 0n) throw new Error("division by zero");
+  if (a.c === 0n) return { c: 0n, e: 0 };
+  var neg = (a.c < 0n) !== (b.c < 0n);
+  var num = a.c < 0n ? -a.c : a.c;
+  var den = b.c < 0n ? -b.c : b.c;
+  var baseExp = a.e - b.e;
+  var s = 28 - (num.toString().length - den.toString().length);
+  var q = 0n;
+  for (var tries = 0; tries < 5; tries++) {
+    var N, Dd;
+    if (s >= 0) { N = num * (10n ** BigInt(s)); Dd = den; }
+    else { N = num; Dd = den * (10n ** BigInt(-s)); }
+    q = N / Dd;
+    var r = N % Dd;
+    var twice = r * 2n;
+    if (twice > Dd || (twice === Dd && (q & 1n) === 1n)) q += 1n;
+    var dl = q.toString().length;
+    if (dl === 28) break;
+    s += (28 - dl);
+  }
+  var e = baseExp - s;
+  while (q !== 0n && q % 10n === 0n) { q = q / 10n; e += 1; }
+  return { c: neg ? -q : q, e: e };
+}
+function decQuantize2(a) {
+  if (a.e === -2) return { c: a.c, e: -2 };
+  if (a.e > -2) return { c: a.c * (10n ** BigInt(a.e + 2)), e: -2 };
+  var div = 10n ** BigInt(-2 - a.e);
+  var neg = a.c < 0n;
+  var abs = neg ? -a.c : a.c;
+  var q = abs / div;
+  var r = abs % div;
+  if (r * 2n >= div) q += 1n;
+  return { c: neg ? -q : q, e: -2 };
+}
+function moneyStr(a) { return decStr(decQuantize2(a)); }
+function decToNumber(d) { return Number(decStr(d)); }
+function decCeilDiv(a, b) {
+  // ceil(a / b) for positive decimals, computed exactly as a rational.
+  function frac(d) {
+    if (d.e >= 0) return [d.c * (10n ** BigInt(d.e)), 1n];
+    return [d.c, 10n ** BigInt(-d.e)];
+  }
+  var fa = frac(a), fb = frac(b);
+  var P = fa[0] * fb[1], Q = fa[1] * fb[0];
+  return Number((P + Q - 1n) / Q);
+}
+function pyRepr(v) {
+  if (v === null || v === undefined) return "None";
+  if (v === true) return "True";
+  if (v === false) return "False";
+  if (typeof v === "string") {
+    var esc = v.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t");
+    if (v.indexOf("'") >= 0 && v.indexOf('"') < 0) return '"' + esc + '"';
+    return "'" + esc.replace(/'/g, "\\'") + "'";
+  }
+  if (typeof v === "number") return String(v);
+  return JSON.stringify(v);
+}
+function toDecimalDet(value, field) {
+  if (typeof value === "number" && !isFinite(value)) throw new Error(field + " is not a finite number: " + pyRepr(value));
+  if (typeof value === "string" && /^\s*[+-]?(nan|inf(inity)?)\s*$/i.test(value)) throw new Error(field + " is not a finite number: " + pyRepr(value));
+  try { return Dec(value); }
+  catch (e) { throw new Error(field + " is not a number: " + pyRepr(value)); }
+}
+function pad2(n) { return (n < 10 ? "0" : "") + n; }
+function parseTimestamp(value) {
+  if (typeof value !== "string" || !value.trim()) throw new Error("timestamp is empty");
+  var text = value.trim();
+  var tz = "";
+  if (text.endsWith("Z")) { text = text.slice(0, -1); tz = "+00:00"; }
+  var m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?)?\s*([+-]\d{2}:?\d{2})?$/.exec(text);
+  if (!m) throw new Error("unparseable timestamp: " + pyRepr(value));
+  var year = +m[1], mo = +m[2], day = +m[3];
+  var hh = m[4] !== undefined ? +m[4] : 0;
+  var mi = m[5] !== undefined ? +m[5] : 0;
+  var ss = m[6] !== undefined ? +m[6] : 0;
+  var frac = m[7] || "";
+  var micro = frac ? parseInt((frac + "000000").slice(0, 6), 10) : 0;
+  var offsetMin = 0;
+  if (m[8]) {
+    var om = /^([+-])(\d{2}):?(\d{2})$/.exec(m[8]);
+    var oh = +om[2], omin = +om[3];
+    if (oh > 23 || omin > 59) throw new Error("unparseable timestamp: " + pyRepr(value));
+    offsetMin = (oh * 60 + omin) * (om[1] === "-" ? -1 : 1);
+    tz = om[1] + pad2(oh) + ":" + pad2(omin);
+  }
+  var msUtc = Date.UTC(year, mo - 1, day, hh, mi, ss, Math.floor(micro / 1000));
+  var chk = new Date(msUtc);
+  if (chk.getUTCFullYear() !== year || chk.getUTCMonth() !== mo - 1 || chk.getUTCDate() !== day ||
+      chk.getUTCHours() !== hh || chk.getUTCMinutes() !== mi || chk.getUTCSeconds() !== ss) {
+    throw new Error("unparseable timestamp: " + pyRepr(value));
+  }
+  var ms = msUtc - offsetMin * 60000;
+  var iso = m[1] + "-" + m[2] + "-" + m[3] + "T" + pad2(hh) + ":" + pad2(mi) + ":" + pad2(ss);
+  if (micro > 0) iso += "." + ("00000" + micro).slice(-6);
+  if (tz) iso += tz;
+  return { ms: ms, iso: iso };
+}
+function resolveTime(load, prefix) {
+  var direct = load[prefix];
+  if (typeof direct === "string" && direct.trim()) return parseTimestamp(direct);
+  if (direct && typeof direct === "object" && !Array.isArray(direct)) {
+    if (direct.datetime) return parseTimestamp(direct.datetime);
+    if (direct.date && direct.time) return parseTimestamp(String(direct.date) + " " + String(direct.time));
+    throw new Error(prefix + " object needs datetime or date plus time");
+  }
+  var d = load[prefix + "_date"], t = load[prefix + "_time"];
+  if (d && t) return parseTimestamp(String(d) + " " + String(t));
+  return null;
+}
+function computeLoad(load, defaults) {
+  var loadId = ("id" in load ? load.id : load.load_id);
+  if (!loadId) throw new Error("missing load id");
+  var idStr = String(loadId);
+  var arrival, departure;
+  try { arrival = resolveTime(load, "arrival"); }
+  catch (e) { throw new Error("load " + idStr + ": " + e.message); }
+  try { departure = resolveTime(load, "departure"); }
+  catch (e) { throw new Error("load " + idStr + ": " + e.message); }
+  if (arrival === null) throw new Error("load " + idStr + ": missing arrival time");
+  if (departure === null) throw new Error("load " + idStr + ": missing departure time");
+  if (departure.ms < arrival.ms) throw new Error("load " + idStr + ": departure " + departure.iso + " is before arrival " + arrival.iso);
+  var freeHours = defaults.freeHours;
+  if (load.free_hours != null) freeHours = toDecimalDet(load.free_hours, "free_hours");
+  else if (load.free_time_hours != null) freeHours = toDecimalDet(load.free_time_hours, "free_time_hours");
+  var rate = defaults.rate;
+  if (load.rate != null) rate = toDecimalDet(load.rate, "rate");
+  else if (load.rate_per_hour != null) rate = toDecimalDet(load.rate_per_hour, "rate_per_hour");
+  var increment = defaults.increment;
+  if (load.increment_minutes != null) increment = toDecimalDet(load.increment_minutes, "increment_minutes");
+  else if (load.billing_increment != null) increment = toDecimalDet(load.billing_increment, "billing_increment");
+  else if (load.billing_increment_minutes != null) increment = toDecimalDet(load.billing_increment_minutes, "billing_increment_minutes");
+  var cap = defaults.cap;
+  if (load.cap != null) cap = toDecimalDet(load.cap, "cap");
+  else if (load.cap_amount != null) cap = toDecimalDet(load.cap_amount, "cap_amount");
+  if (decCmp(freeHours, Dec(0)) < 0) throw new Error("load " + idStr + ": free_hours is negative");
+  if (decCmp(rate, Dec(0)) < 0) throw new Error("load " + idStr + ": rate is negative");
+  if (decCmp(increment, Dec(0)) <= 0) throw new Error("load " + idStr + ": billing increment must be positive");
+  if (cap !== null && decCmp(cap, Dec(0)) < 0) throw new Error("load " + idStr + ": cap is negative");
+  var waitMs = departure.ms - arrival.ms;
+  var waitMinutes = decDiv(Dec(waitMs), Dec(60000));
+  var waitHours = decDiv(waitMinutes, Dec(60));
+  var freeMinutes = decMul(freeHours, Dec(60));
+  var excess = decSub(waitMinutes, freeMinutes);
+  var billableMinutes;
+  if (decCmp(excess, Dec(0)) <= 0) billableMinutes = Dec(0);
+  else billableMinutes = decMul(Dec(decCeilDiv(excess, increment)), increment);
+  var billableHours = decDiv(billableMinutes, Dec(60));
+  var amount = decQuantize2(decMul(billableHours, rate));
+  var capped = false;
+  if (cap !== null && decCmp(amount, cap) > 0) { amount = decQuantize2(cap); capped = true; }
+  return {
+    id: idStr, arrival: arrival.iso, departure: departure.iso,
+    waitHours: decToNumber(waitHours), freeHours: decToNumber(freeHours),
+    billableHours: decToNumber(billableHours), amount: amount, capped: capped
+  };
+}
+function optDec(v, fallback) {
+  if (v === undefined || v === null || v === "") return Dec(fallback);
+  return Dec(String(v));
+}
+window.runTool = function (inputText, options) {
+  options = options || {};
+  var defaults = {
+    freeHours: optDec(options.freeHours, "2"),
+    rate: optDec(options.rate, "75"),
+    increment: optDec(options.increment, "15"),
+    cap: (options.cap === undefined || options.cap === null || options.cap === "") ? null : Dec(String(options.cap))
+  };
+  var data;
+  try { data = JSON.parse(inputText); }
+  catch (e) { return "ERROR: invalid JSON: " + e.message + "\n"; }
+  var entries = null;
+  if (Array.isArray(data)) entries = data;
+  else if (data && typeof data === "object") {
+    var keys = ["loads", "entries", "data"];
+    for (var i = 0; i < keys.length; i++) {
+      if (Array.isArray(data[keys[i]])) { entries = data[keys[i]]; break; }
+    }
+  }
+  if (!entries) return "ERROR: input must be a JSON list or an object with a loads list\n";
+  var loads = [], errors = [];
+  entries.forEach(function (entry) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      errors.push("load entry is not an object: " + pyRepr(entry));
+      return;
+    }
+    try { loads.push(computeLoad(entry, defaults)); }
+    catch (e) { errors.push(e.message); }
+  });
+  var lines = [];
+  var totalWait = 0, totalBillable = 0, totalAmount = Dec(0);
+  loads.forEach(function (item) {
+    lines.push(item.id + ": arrival " + item.arrival + ", departure " + item.departure +
+      ", wait " + item.waitHours.toFixed(2) + " h, free " + item.freeHours.toFixed(2) +
+      " h, billable " + item.billableHours.toFixed(2) + " h, $" + moneyStr(item.amount) +
+      (item.capped ? " (capped)" : ""));
+    totalWait += item.waitHours;
+    totalBillable += item.billableHours;
+    totalAmount = decAdd(totalAmount, item.amount);
+  });
+  lines.push("");
+  lines.push("Loads: " + loads.length + ", total wait " + totalWait.toFixed(2) +
+    " h, total billable " + totalBillable.toFixed(2) + " h, total amount $" + moneyStr(totalAmount));
+  errors.forEach(function (err) { lines.push("ERROR: " + err); });
+  return lines.join("\n") + "\n";
+};
+</script>
+<script>
+var SAMPLE = `[
+  {
+    "arrival": "2026-11-02T08:00:00",
+    "billing_increment_minutes": 15,
+    "departure": "2026-11-02T09:30:00",
+    "free_hours": 2,
+    "id": "L-101",
+    "rate_per_hour": 75
+  },
+  {
+    "arrival": "2026-11-02T08:00:00",
+    "billing_increment_minutes": 15,
+    "departure": "2026-11-02T11:10:00",
+    "free_hours": 2,
+    "id": "L-102",
+    "rate_per_hour": 75
+  },
+  {
+    "arrival": "2026-11-02T22:00:00",
+    "billing_increment_minutes": 15,
+    "departure": "2026-11-03T06:30:00",
+    "free_hours": 2,
+    "id": "L-103",
+    "rate_per_hour": 75
+  },
+  {
+    "arrival": "2026-11-02T07:00:00",
+    "billing_increment_minutes": 15,
+    "cap_amount": 300,
+    "departure": "2026-11-02T19:00:00",
+    "free_hours": 2,
+    "id": "L-104",
+    "rate_per_hour": 75
+  }
+]`;
+var inputEl = document.getElementById("input");
+var outEl = document.getElementById("out");
+var lastReport = "";
+document.getElementById("file").addEventListener("change", function (ev) {
+  var f = ev.target.files && ev.target.files[0];
+  if (!f) return;
+  var reader = new FileReader();
+  reader.onload = function () { inputEl.value = String(reader.result || ""); };
+  reader.readAsText(f);
+});
+document.getElementById("sample").addEventListener("click", function () {
+  inputEl.value = SAMPLE;
+});
+document.getElementById("run").addEventListener("click", function () {
+  var capVal = document.getElementById("opt-cap").value;
+  var options = {
+    freeHours: document.getElementById("opt-free").value,
+    rate: document.getElementById("opt-rate").value,
+    increment: document.getElementById("opt-inc").value,
+    cap: capVal === "" ? null : capVal
+  };
+  try {
+    lastReport = window.runTool(inputEl.value, options);
+    outEl.textContent = lastReport;
+  } catch (e) {
+    lastReport = "ERROR: " + e.message + "\n";
+    outEl.textContent = lastReport;
+  }
+});
+document.getElementById("download").addEventListener("click", function () {
+  var text = lastReport || outEl.textContent;
+  var blob = new Blob([text], { type: "text/plain" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = "detention-pay-report.txt";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+});
+</script>
+</body>
+</html>
